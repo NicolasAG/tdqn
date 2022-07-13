@@ -10,7 +10,7 @@ from jericho.defines import *
 def start_redis():
     print('Starting Redis')
     subprocess.Popen(['redis-server', '--save', '\"\"', '--appendonly', 'no'])
-    time.sleep(1)
+    time.sleep(3)
 
 
 class JerichoEnv:

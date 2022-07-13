@@ -1,4 +1,6 @@
 import os
+from os.path import join as pjoin
+import json
 import argparse
 import jericho
 from tdqn import TDQN_Trainer
@@ -32,3 +34,30 @@ if __name__ == "__main__":
     print(args)
     trainer = TDQN_Trainer(args)
     trainer.train()
+
+    with open(pjoin(args.output_dir, trainer.filename + '_trajectories.json'), "r") as f:
+        trajectories = json.load(f)
+    print(f"generated {len(trajectories)} during training.")
+    max_score = max([traj['score'] for traj in trajectories])
+
+    n_max = len([t for t in trajectories if t['score'] == max_score])
+    print(f"Only {n_max} of them have a max score of {max_score}.")
+
+    extra = 1000
+    print(f"try to generate {extra} more with score >= {max_score}...")
+    new_trajectories = trainer.generate(n=extra)
+    cnt = 0
+    for traj in new_trajectories:
+        if traj['score'] >= max_score:
+            trajectories.append(traj)
+            cnt += 1
+    print(f"generated {cnt} more.")
+    print(f"min | avg | max score of new trajectories: "
+          f"{min([t['score'] for t in new_trajectories])} | "
+          f"{sum([t['score'] for t in new_trajectories]) / len(new_trajectories)} | "
+          f"{max([t['score'] for t in new_trajectories])}")
+
+    print(f"save new trajectories...")
+    with open(pjoin(args.output_dir, trainer.filename + '_trajectories.json'), "w") as f:
+        json.dump(trajectories, f)
+    print("done.")

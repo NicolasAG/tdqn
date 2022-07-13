@@ -1,6 +1,7 @@
 import time
 import math, random
 import numpy as np
+import os
 from os.path import join as pjoin
 
 import torch
@@ -11,6 +12,7 @@ import torch.nn.functional as F
 
 import logger
 import copy
+import json
 
 from replay import *
 from schedule import *
@@ -44,6 +46,8 @@ class TDQN_Trainer(object):
         self.update_freq = args.update_freq_td
         self.update_freq_tar = args.update_freq_tar
         self.filename = 'tdqn'
+        game = args.rom_path.split('/')[-1]
+        self.filename += f"_{game}"
 
         self.sp = spm.SentencePieceProcessor()
         self.sp.Load(args.spm_path)
@@ -60,8 +64,19 @@ class TDQN_Trainer(object):
         elif args.replay_buffer_type == 'standard':
             self.replay_buffer = ReplayBuffer(int(args.replay_buffer_size))
 
-        self.model = TDQN(args, self.template_size, vocab_size, vocab_size_act).cuda()
-        self.target_model = TDQN(args, self.template_size, vocab_size, vocab_size_act).cuda()
+        self.model = TDQN(args, self.template_size, vocab_size, vocab_size_act)
+        self.target_model = TDQN(args, self.template_size, vocab_size, vocab_size_act)
+
+        # see if we can load params from already saved model
+        if os.path.isfile(pjoin(self.args.output_dir, self.filename + '_final.pt')):
+            print(f"LOADING PRE-TRAINED WEIGHTS FROM {self.filename}_final.pt")
+            parameters = torch.load(pjoin(self.args.output_dir, self.filename + '_final.pt'))
+            self.model = parameters['model']
+            self.target_model = parameters['target']
+            self.replay_buffer = parameters['replay_buffer']
+
+        self.model = self.model.cuda()
+        self.target_model = self.target_model.cuda()
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr)
 
@@ -203,6 +218,9 @@ class TDQN_Trainer(object):
         episode = 1
         state_text, info = env.reset()
         state_rep = self.state_rep_generator(state_text)
+        trajectories = []
+        trajectory = []
+        max_score = -1000000000
 
         for frame_idx in range(1, self.num_steps + 1):
             found_valid_action = False
@@ -216,10 +234,14 @@ class TDQN_Trainer(object):
                         found_valid_action = True
                         break
 
+            trajectory.append(action_str)
+
             if episode % 100 == 0:
                 log('Action: {} Q_t: {:.2f} Q_o1: {:.2f} Q_o2: {:.2f}'.format(action_str, q_t, q_o1, q_o2))
                 log('Obs: {}'.format(clean(next_state_text.split('|')[2])))
                 log('Reward {}: {}'.format(env.steps, reward))
+                with open(pjoin(self.args.output_dir, self.filename + '_trajectories.json'), "w") as f:
+                    json.dump(trajectories, f)
 
             valid_acts = info['valid']
             template_targets, obj_targets = self.generate_targets_multilabel(valid_acts)
@@ -234,6 +256,10 @@ class TDQN_Trainer(object):
                 if episode % 100 == 0:
                     log('Episode {} Score {}\n'.format(episode, score))
                 tb.logkv_mean('EpisodeScore', score)
+                if score >= max_score:
+                    trajectories.append({'actions': trajectory, 'score': score})
+                    max_score = score
+                trajectory = []
                 state_text, info = env.reset()
                 state_rep = self.state_rep_generator(state_text)
                 episode += 1
@@ -259,6 +285,37 @@ class TDQN_Trainer(object):
             'replay_buffer': self.replay_buffer
         }
         torch.save(parameters, pjoin(self.args.output_dir, self.filename + '_final.pt'))
+        with open(pjoin(self.args.output_dir, self.filename + '_trajectories.json'), "w") as f:
+            json.dump(trajectories, f)
+
+
+    def generate(self, n=1):
+        env = JerichoEnv(self.args.rom_path, 0, self.vocab_act_rev,
+                         self.args.env_step_limit)
+        env.create()
+        trajectories = []
+        for _ in range(n):
+            state_text, info = env.reset()
+            state_rep = self.state_rep_generator(state_text)
+
+            trajectory = []
+            done = False
+            while not done:
+                found_valid_action = False
+                while not found_valid_action:
+                    templates, o1s, o2s, _, _, _ = self.model.poly_act(state_rep)
+                    for template, o1, o2 in zip(templates, o1s, o2s):
+                        action_str = self.tmpl_to_str(template, o1, o2)
+                        next_state_text, reward, done, info = env.step(action_str)
+                        if info['action_valid'] == True:
+                            found_valid_action = True
+                            break
+                trajectory.append(action_str)
+
+            trajectories.append({'actions': trajectory, 'score': info['score']})
+
+        env.close()
+        return trajectories
 
 
 def pad_sequences(sequences, maxlen=None, dtype='int32', value=0.):

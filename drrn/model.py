@@ -45,7 +45,7 @@ class DRRN(torch.nn.Module):
         # Run the embedding layer
         embed = self.embedding(x_tt).permute(1,0,2) # Time x Batch x EncDim
         # Pack padded batch of sequences for RNN module
-        packed = nn.utils.rnn.pack_padded_sequence(embed, lengths)
+        packed = nn.utils.rnn.pack_padded_sequence(embed, lengths.cpu())
         # Run the RNN
         out, _ = rnn(packed)
         # Unpack

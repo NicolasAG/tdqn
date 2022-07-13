@@ -21,6 +21,7 @@ class DRRN_Agent:
         self.network = DRRN(len(self.sp), args.embedding_dim, args.hidden_dim).to(device)
         self.memory = ReplayMemory(args.memory_size)
         self.save_path = args.output_dir
+        self._the_game = args.rom_path.split('/')[-1]
         self.clip = args.clip
         self.optimizer = torch.optim.Adam(self.network.parameters(),
                                           lr=args.learning_rate)
@@ -84,17 +85,17 @@ class DRRN_Agent:
 
     def load(self):
         try:
-            self.memory = pickle.load(open(pjoin(self.save_path, 'memory.pkl'), 'rb'))
-            self.network = torch.load(pjoin(self.save_path, 'model.pt'))
+            self.memory = pickle.load(open(pjoin(self.save_path, f'drrn_{self._the_game}_memory.pkl'), 'rb'))
+            self.network = torch.load(pjoin(self.save_path, f'drrn_{self._the_game}_model.pt'))
         except Exception as e:
-            print("Error saving model.")
+            print("Error loading model.")
             logging.error(traceback.format_exc())
 
 
     def save(self):
         try:
-            pickle.dump(self.memory, open(pjoin(self.save_path, 'memory.pkl'), 'wb'))
-            torch.save(self.network, pjoin(self.save_path, 'model.pt'))
+            pickle.dump(self.memory, open(pjoin(self.save_path, f'drrn_{self._the_game}_memory.pkl'), 'wb'))
+            torch.save(self.network, pjoin(self.save_path, f'drrn_{self._the_game}_model.pt'))
         except Exception as e:
             print("Error saving model.")
             logging.error(traceback.format_exc())

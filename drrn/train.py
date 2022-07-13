@@ -1,6 +1,8 @@
 import subprocess
 import time
 import os
+from os.path import join as pjoin
+import json
 import torch
 import logger
 import argparse
@@ -23,12 +25,23 @@ def configure_logger(log_dir):
     log = logger.log
 
 
+def genereate_trajectories(agent, env, nb_episodes=1):
+    with torch.no_grad():
+        trajectories = []
+        for ep in range(nb_episodes):
+            log("Starting evaluation episode {}".format(ep))
+            score, actions = evaluate_episode(agent, env)
+            log("Evaluation episode {} ended with score {}\n\n".format(ep, score))
+            trajectories.append({'score': score, 'actions': actions})
+        return trajectories
+
+
 def evaluate(agent, env, nb_episodes=1):
     with torch.no_grad():
         total_score = 0
         for ep in range(nb_episodes):
             log("Starting evaluation episode {}".format(ep))
-            score = evaluate_episode(agent, env)
+            score, _ = evaluate_episode(agent, env)
             log("Evaluation episode {} ended with score {}\n\n".format(ep, score))
             total_score += score
         avg_score = total_score / nb_episodes
@@ -37,6 +50,7 @@ def evaluate(agent, env, nb_episodes=1):
 
 def evaluate_episode(agent, env):
     step = 0
+    actions = []
     done = False
     ob, info = env.reset()
     state = agent.build_state([ob], [info])[0]
@@ -56,13 +70,16 @@ def evaluate_episode(agent, env):
         ob, rew, done, info = env.step(action_str)
         log("Reward{}: {}, Score {}, Done {}".format(step, rew, info['score'], done))
         step += 1
+        actions.append(action_str)
         log('Obs{}: {} Inv: {} Desc: {}'.format(step, clean(ob), clean(info['inv']), clean(info['look'])))
         state = agent.build_state([ob], [info])[0]
-    return info['score']
+    return info['score'], actions
 
 
 def train(agent, eval_env, envs, max_steps, update_freq, eval_freq, checkpoint_freq, log_freq):
     start = time.time()
+    trajectories = []
+    max_score = -1000000000
     obs, infos = envs.reset()
     states = agent.build_state(obs, infos)
     valid_ids = [agent.encode(info['valid']) for info in infos]
@@ -90,10 +107,18 @@ def train(agent, eval_env, envs, max_steps, update_freq, eval_freq, checkpoint_f
                 tb.logkv_mean('Loss', loss)
         if step % checkpoint_freq == 0:
             agent.save()
+            with open(pjoin(agent.save_path, f'drrn_{agent._the_game}_trajectories.json'), "w") as f:
+                json.dump(trajectories, f)
         if step % eval_freq == 0:
             eval_score = evaluate(agent, eval_env)
             tb.logkv('EvalScore', eval_score)
             tb.dumpkvs()
+        # generate new trajectory at each step
+        new_trajectories = genereate_trajectories(agent, eval_env, nb_episodes=1)
+        for traj in new_trajectories:
+            if traj['score'] >= max_score:
+                max_score = traj['score']
+                trajectories.append(traj)
 
 
 def parse_args():
@@ -124,6 +149,7 @@ def start_redis():
     subprocess.Popen(['redis-server', '--save', '\"\"', '--appendonly', 'no'])
     time.sleep(1)
 
+
 def main():
     assert jericho.__version__ == '2.1.0', "This code is designed to be run with Jericho version 2.1.0."
     args = parse_args()
@@ -131,11 +157,43 @@ def main():
     configure_logger(args.output_dir)
     start_redis()
     agent = DRRN_Agent(args)
+    # load model weights if they exists
+    if os.path.isfile(pjoin(agent.save_path, f'drrn_{agent._the_game}_model.pt')):
+        print(f"LOADING PRE-TRAINED WEIGHTS FROM drrn_{agent._the_game}_model.pt")
+        agent.load()
+
     env = JerichoEnv(args.rom_path, args.seed, args.env_step_limit)
     envs = VecEnv(args.num_envs, env)
-    env.create() # Create the environment for evaluation
+    env.create()  # Create the environment for evaluation
     train(agent, env, envs, args.max_steps, args.update_freq, args.eval_freq,
           args.checkpoint_freq, args.log_freq)
+
+    with open(pjoin(agent.save_path, f'drrn_{agent._the_game}_trajectories.json'), "r") as f:
+        trajectories = json.load(f)
+    print(f"generated {len(trajectories)} during training.")
+    max_score = max([traj['score'] for traj in trajectories])
+
+    n_max = len([t for t in trajectories if t['score'] == max_score])
+    print(f"Only {n_max} of them have a max score of {max_score}.")
+
+    extra = 1000
+    print(f"try to generate {extra} more with score >= {max_score}...")
+    new_trajectories = genereate_trajectories(agent, env, extra)
+    cnt = 0
+    for traj in new_trajectories:
+        if traj['score'] >= max_score:
+            trajectories.append(traj)
+            cnt += 1
+    print(f"generated {cnt} more.")
+    print(f"min | avg | max score of new trajectories: "
+          f"{min([t['score'] for t in new_trajectories])} | "
+          f"{sum([t['score'] for t in new_trajectories]) / len(new_trajectories)} | "
+          f"{max([t['score'] for t in new_trajectories])}")
+
+    print(f"save new trajectories...")
+    with open(pjoin(agent.save_path, f'drrn_{agent._the_game}_trajectories.json'), "w") as f:
+        json.dump(trajectories, f)
+    print("done.")
 
 
 def interactive_run(env):
